@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shelter Locator — San Mateo, Isabela</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css"/>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0078d7">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+html,body {height:100%; margin:0; font-family:Arial, sans-serif;}
+#map {height:100%;}
+#controlToggle {position:absolute; bottom:10px; left:10px; z-index:1000; width:40px; height:40px; border-radius:50%; background:#fff; display:flex; justify-content:center; align-items:center; box-shadow:0 1px 8px rgba(0,0,0,0.3); cursor:pointer;}
+#controlPanel {position:absolute; bottom:60px; left:10px; z-index:1000; background:white; padding:10px; border-radius:8px; width:260px; box-shadow:0 1px 8px rgba(0,0,0,0.3); display:none;}
+#controlPanel select, #controlPanel button {width:100%; margin-top:5px; padding:5px;}
+#markerInfo {position:absolute; bottom:80px; left:50%; transform:translateX(-50%); background:white; padding:5px 10px; border-radius:8px; box-shadow:0 1px 8px rgba(0,0,0,0.2); z-index:1001;}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+<div id="controlToggle">⋮</div>
+<div id="controlPanel">
+  <button id="locateBtn">Show My Location</button>
+  <select id="destination"><option value="">Select Shelter</option></select>
+  <button id="routeBtn">Route to Shelter (Offline Straight Line)</button>
+</div>
+
+<!-- Firebase SDKs -->
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js"></script>
+<script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+
+<script>
+/* ============================
+   🔑 Firebase config (real values)
+   ============================ */
+const firebaseConfig = {
+  apiKey: "AIzaSyDnELgmIyXPVQAk69rz9db1m4fV64QIQeE",
+  authDomain: "shelter-dcdab.firebaseapp.com",
+  projectId: "shelter-dcdab",
+  storageBucket: "shelter-dcdab.firebasestorage.app",
+  messagingSenderId: "192730355402",
+  appId: "1:192730355402:web:73a661300ab80e6db4c633",
+  measurementId: "G-TSKM5XS577"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+/* ============================
+   Map + UI
+   ============================ */
+let shelterMarkersArr = [];
+const map = L.map('map').setView([16.8827,121.5945],14);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19, attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
+
+let userMarker=null, routeLine=null, routingControl=null;
+let watchId = null;
+const toggleBtn = document.getElementById('controlToggle');
+const controlPanel = document.getElementById('controlPanel');
+toggleBtn.onclick = ()=>{ controlPanel.style.display = controlPanel.style.display==='none'?'block':'none'; };
+
+const locateBtn = document.getElementById('locateBtn');
+locateBtn.onclick = function(){
+  const btn = this;
+  if (!navigator.geolocation) { alert("Geolocation not supported."); return; }
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+    btn.textContent = "Show My Location";
+    return;
+  }
+  watchId = navigator.geolocation.watchPosition(
+    pos => {
+      const latlng = [pos.coords.latitude,pos.coords.longitude];
+      if (userMarker) userMarker.setLatLng(latlng);
+      else userMarker = L.marker(latlng).addTo(map);
+      userMarker.bindPopup("📍 You are here").openPopup();
+      map.setView(latlng, 16);
+    },
+    err => {
+      if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+      btn.textContent = "Show My Location";
+      switch(err.code){
+        case err.PERMISSION_DENIED: alert("❌ Location access denied."); break;
+        case err.POSITION_UNAVAILABLE: alert("⚠️ Location unavailable."); break;
+        case err.TIMEOUT: alert("⏳ Location request timed out."); break;
+        default: alert("Unknown error: " + (err.message || err.code));
+      }
+    },
+    { enableHighAccuracy:true, maximumAge:0, timeout:10000 }
+  );
+  btn.textContent = "Stop Tracking";
+};
+
+map.on('click', function(e){
+  if (userMarker) userMarker.setLatLng(e.latlng);
+  else userMarker = L.marker(e.latlng).addTo(map);
+  userMarker.bindPopup("📍 You are here").openPopup();
+});
+
+/* ============================
+   Render shelters from Firestore snapshot
+   ============================ */
+function renderSheltersFromSnapshot(snapshot){
+  shelterMarkersArr.forEach(m=>map.removeLayer(m));
+  shelterMarkersArr=[];
+  const destDropdown=document.getElementById('destination');
+  destDropdown.innerHTML='<option value="">Select Shelter</option>';
+
+  snapshot.forEach(doc=>{
+    const s = doc.data();
+    const marker = L.circleMarker(s.coords,{radius:8,color:'red',fillColor:'#f03',fillOpacity:0.8}).addTo(map);
+    marker.bindPopup(`<b>${s.name}</b><br>Capacity: ${s.capacity || 'N/A'}`);
+    shelterMarkersArr.push(marker);
+
+    const opt=document.createElement('option');
+    opt.value = doc.id;
+    opt.textContent = s.name;
+    destDropdown.appendChild(opt);
+
+    marker.on('click', ()=> showShelterInfo(s));
+  });
+}
+
+function showShelterInfo(s){
+  if(!userMarker){ alert("Click 'Show My Location' first."); return; }
+  if(document.getElementById('markerInfo')) document.getElementById('markerInfo').remove();
+  const from = userMarker.getLatLng();
+  const to = L.latLng(s.coords[0], s.coords[1]);
+  const distance = from.distanceTo(to).toFixed(0);
+  const infoDiv = document.createElement('div');
+  infoDiv.id='markerInfo';
+  infoDiv.innerHTML = `<b>${s.name}</b><br>Capacity: ${s.capacity || 'N/A'}<div id="infoDetails" style="display:none; margin-top:5px;">Distance: ${distance} m</div><button id="toggleInfoBtn" style="margin-top:5px;">Show Info</button>`;
+  document.body.appendChild(infoDiv);
+  document.getElementById('toggleInfoBtn').onclick = function(){
+    const det=document.getElementById('infoDetails');
+    if(det.style.display==='none'){ det.style.display='block'; this.textContent='Hide Info'; }
+    else{ det.style.display='none'; this.textContent='Show Info'; }
+  };
+
+  if(routeLine) map.removeLayer(routeLine);
+  if(routingControl) map.removeControl(routingControl);
+  routingControl = L.Routing.control({
+    waypoints:[from,to],
+    lineOptions:{styles:[{color:'blue', opacity:0.7, weight:5}]},
+    show:true, draggableWaypoints:false, addWaypoints:false, routeWhileDragging:false,
+    geocoder:L.Control.Geocoder.nominatim()
+  }).addTo(map);
+}
+
+/* ============================
+   Route button uses doc id from select
+   ============================ */
+document.getElementById('routeBtn').onclick = function(){
+  const sel = document.getElementById('destination').value;
+  if(!sel || !userMarker){ alert("Select shelter and set your location first."); return; }
+  db.collection('shelters').doc(sel).get().then(doc=>{
+    if(!doc.exists) return;
+    const s = doc.data();
+    const from = userMarker.getLatLng();
+    const to = L.latLng(s.coords[0], s.coords[1]);
+    if(routeLine) map.removeLayer(routeLine);
+    if(routingControl){ map.removeControl(routingControl); routingControl=null; }
+    routeLine = L.polyline([from,to],{color:'blue',weight:4,dashArray:'5,5'}).addTo(map);
+    map.fitBounds(L.latLngBounds([from,to]).pad(0.3));
+  });
+};
+
+/* ============================
+   Geocoder control
+   ============================ */
+L.Control.geocoder({defaultMarkGeocode:false, position:'topright'})
+  .on('markgeocode', function(e){
+    const latlng=e.geocode.center;
+    L.marker(latlng).addTo(map).bindPopup("Destination:<br>"+e.geocode.name).openPopup();
+    map.setView(latlng,16);
+    if(!userMarker){ alert("Click 'Show My Location' first."); return; }
+    if(routeLine) map.removeLayer(routeLine);
+    if(routingControl) map.removeControl(routingControl);
+    routingControl=L.Routing.control({
+      waypoints:[userMarker.getLatLng(),latlng],
+      lineOptions:{styles:[{color:'blue', opacity:0.7, weight:5}]},
+      show:true, draggableWaypoints:false, addWaypoints:false, routeWhileDragging:false,
+      geocoder:L.Control.Geocoder.nominatim()
+    }).addTo(map);
+  }).addTo(map);
+
+/* ============================
+   Firestore realtime listener
+   ============================ */
+db.collection('shelters').onSnapshot(snapshot=>{
+  renderSheltersFromSnapshot(snapshot);
+}, err => console.error("Firestore listener error:", err));
+</script>
+</body>
+</html>
+
+
+
+
+
+
+
+

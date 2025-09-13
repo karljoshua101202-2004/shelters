@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin — Shelter Locator</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<meta name="theme-color" content="#0078d7">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+html,body {height:100%; margin:0; font-family:Segoe UI, Roboto, Arial, sans-serif; background:#f5f6fa;}
+#map {height:50%;}
+#adminPanel {padding:20px; background:#fff; box-shadow:0 4px 12px rgba(0,0,0,0.1); border-radius:12px; width:95%; max-width:800px; margin:20px auto;}
+#adminPanel h3 { margin-top:0; text-align:center; color:#333; }
+#adminPanel h4 { margin:15px 0 10px; color:#444; }
+input, select {padding:6px; border:1px solid #ccc; border-radius:6px; font-size:13px;}
+button {padding:6px 10px; border:none; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer;}
+#loginBtn, #addShelterBtn, .saveBtn {background:#0078d7; color:#fff;}
+#logoutBtn {background:#ff4757; color:#fff;}
+#deleteShelterBtn {background:#ffa502; color:#fff;}
+#forgotBtn { background:#6c5ce7; color:#fff; margin-top:8px; }
+table {width:100%; border-collapse:collapse; margin-top:10px;}
+th, td {border:1px solid #ddd; padding:8px; text-align:center;}
+th {background:#f1f1f1;}
+#seedBtn { background:#34c759; color:#fff; margin-top:8px; }
+</style>
+</head>
+<body>
+
+<div id="adminPanel">
+  <h3>🔑 Admin Login (Firebase)</h3>
+  <input type="text" id="adminUser" placeholder="Admin email">
+  <input type="password" id="adminPass" placeholder="Password">
+  <button id="loginBtn">Login</button>
+  <button id="forgotBtn">Forgot password?</button>
+  <button id="logoutBtn" style="display:none;">Logout</button>
+
+  <div id="shelterForm" style="display:none;">
+    <h4>🏠 Manage Shelters</h4>
+    <input type="text" id="shelterName" placeholder="Shelter Name">
+    <input type="text" id="shelterLat" placeholder="Latitude">
+    <input type="text" id="shelterLng" placeholder="Longitude">
+    <input type="text" id="shelterCap" placeholder="Capacity (e.g. 1-100)">
+    <button id="addShelterBtn">Add / Update Shelter</button>
+
+    <h4>🗑️ Delete / Edit Shelter</h4>
+    <select id="deleteShelterSelect"><option value="">-- Select Shelter --</option></select>
+    <button id="deleteShelterBtn">Delete Selected Shelter</button>
+
+    <h4>✏️ Edit Shelter Capacity</h4>
+    <div id="capacityTable"></div>
+
+    <button id="seedBtn" style="display:inline-block;">Seed Default Shelters</button>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<!-- Firebase SDKs -->
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+/* ============================
+   🔑 Firebase config (real values)
+   ============================ */
+const firebaseConfig = {
+  apiKey: "AIzaSyDnELgmIyXPVQAk69rz9db1m4fV64QIQeE",
+  authDomain: "shelter-dcdab.firebaseapp.com",
+  projectId: "shelter-dcdab",
+  storageBucket: "shelter-dcdab.firebasestorage.app",
+  messagingSenderId: "192730355402",
+  appId: "1:192730355402:web:73a661300ab80e6db4c633",
+  measurementId: "G-TSKM5XS577"
+};
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+
+/* helper */
+function safeId(id){ return id.replace(/[^a-zA-Z0-9\-_]/g,'_'); }
+
+/* map */
+let markers = [];
+const map = L.map('map').setView([16.8827,121.5945],14);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
+
+/* render shelters */
+function renderFromSnapshotDocs(docs){
+  markers.forEach(m=>map.removeLayer(m)); markers=[];
+  updateDeleteDropdown(docs);
+  renderCapacityTable(docs);
+  docs.forEach(doc=>{
+    const s = doc.data();
+    const marker = L.circleMarker(s.coords,{radius:8,color:'red',fillColor:'#f03',fillOpacity:0.8})
+      .addTo(map).bindPopup(`<b>${s.name}</b><br>Capacity: ${s.capacity||"N/A"}`);
+    markers.push(marker);
+  });
+}
+function updateDeleteDropdown(docs){
+  const sel = document.getElementById('deleteShelterSelect');
+  sel.innerHTML = '<option value="">-- Select Shelter --</option>';
+  docs.forEach(doc=>{
+    const s = doc.data();
+    const opt = document.createElement('option');
+    opt.value = doc.id;
+    opt.textContent = `${s.name} (${s.capacity||"N/A"})`;
+    sel.appendChild(opt);
+  });
+}
+function renderCapacityTable(docs){
+  const div = document.getElementById('capacityTable');
+  let html = `<table><tr><th>Shelter</th><th>Capacity</th><th>Action</th></tr>`;
+  docs.forEach(doc=>{
+    const s = doc.data();
+    const idSafe = safeId(doc.id);
+    html += `<tr>
+      <td>${s.name}</td>
+      <td><input type="text" id="cap-${idSafe}" value="${s.capacity||''}" style="width:100px"></td>
+      <td><button class="saveBtn" onclick="saveCapacity('${doc.id}')">Save</button></td>
+    </tr>`;
+  });
+  html += `</table>`;
+  div.innerHTML = html;
+}
+async function saveCapacity(docId){
+  const idSafe = safeId(docId);
+  const newCap = document.getElementById(`cap-${idSafe}`).value;
+  if(!newCap){ alert("Enter capacity."); return; }
+  await db.collection('shelters').doc(docId).update({ capacity: newCap });
+  alert("✅ Capacity updated for "+docId);
+}
+
+/* realtime listener */
+let unsubscribe = null;
+function listenSheltersRealtime(){
+  if(unsubscribe) unsubscribe();
+  unsubscribe = db.collection('shelters').onSnapshot(snapshot=>{
+    const docs = [];
+    snapshot.forEach(doc=> docs.push(doc));
+    renderFromSnapshotDocs(docs);
+  }, err=> console.error("snapshot err", err));
+}
+
+/* seed shelters */
+async function seedShelters(){
+  if(!auth.currentUser){ alert("Sign in first to seed shelters."); return; }
+  const snapshot = await db.collection('shelters').get();
+  if(!snapshot.empty){ alert("Shelters already exist — seeding skipped."); return; }
+  const defaults = [
+    {name:"malasin", coords:[16.86909, 121.59931], capacity:"1-100"},
+    {name:"SMGCHS", coords:[16.88988,121.5678], capacity:"1-100"},
+    {name:"ncc", coords:[16.88115, 121.58619], capacity:"1-400"},
+    {name:"smvhis", coords:[16.90235, 121.61287], capacity:"1-100"},
+    {name:"san ignacio elem school", coords:[16.89716, 121.58842], capacity:"1-100"},
+    {name:"mapuroc elem school", coords:[16.8968, 121.5750], capacity:"1-100"},
+    {name:"san roque elem school", coords:[16.9071, 121.5836], capacity:"1-100"},
+    {name:"estrella elem school", coords:[16.87497, 121.55886], capacity:"1-100"},
+    {name:"dagupan elem school", coords:[16.8674, 121.5732], capacity:"1-100"},
+    {name:"SNHS", coords:[16.86603, 121.6137], capacity:"1-100"}
+  ];
+  for(const s of defaults){
+    await db.collection('shelters').doc(s.name).set(s);
+  }
+  alert("✅ Default shelters seeded!");
+}
+
+/* auth actions */
+document.getElementById('loginBtn').onclick = async function(){
+  const email = document.getElementById('adminUser').value;
+  const pass  = document.getElementById('adminPass').value;
+  if(!email||!pass){ alert("Enter admin email and password."); return; }
+  try {
+    await auth.signInWithEmailAndPassword(email, pass);
+    document.getElementById('shelterForm').style.display = "block";
+    this.style.display = "none";
+    document.getElementById('logoutBtn').style.display = "inline-block";
+    listenSheltersRealtime();
+    alert("✅ Logged in as "+email);
+  } catch(e){
+    console.error("login error", e);
+    alert("❌ Login failed: " + (e.code || "") + " — " + (e.message || ""));
+  }
+};
+document.getElementById('forgotBtn').onclick = async function(){
+  const email = document.getElementById('adminUser').value;
+  if(!email){ alert("⚠️ Enter admin email first to receive reset link."); return; }
+  try {
+    await auth.sendPasswordResetEmail(email);
+    alert("📩 Password reset email sent to " + email + ". Check inbox/spam.");
+  } catch(e){
+    console.error("reset err", e);
+    alert("❌ Password reset failed: " + (e.code || "") + " — " + (e.message || ""));
+  }
+};
+document.getElementById('logoutBtn').onclick = async function(){
+  await auth.signOut();
+  document.getElementById('shelterForm').style.display = "none";
+  this.style.display = "none";
+  document.getElementById('loginBtn').style.display = "inline-block";
+  if(unsubscribe) unsubscribe();
+  alert("👋 Logged out");
+};
+document.getElementById('addShelterBtn').onclick = async function(){
+  if(!auth.currentUser){ alert("Sign in first."); return; }
+  const name = document.getElementById('shelterName').value.trim();
+  const lat = parseFloat(document.getElementById('shelterLat').value);
+  const lng = parseFloat(document.getElementById('shelterLng').value);
+  const cap = document.getElementById('shelterCap').value || "1-100";
+  if(!name || isNaN(lat) || isNaN(lng)){ alert("Complete fields (name, lat, lng)"); return; }
+  await db.collection('shelters').doc(name).set({ name, coords:[lat,lng], capacity:cap });
+  alert("✅ Shelter saved to Firestore");
+};
+document.getElementById('deleteShelterBtn').onclick = async function(){
+  if(!auth.currentUser){ alert("Sign in first."); return; }
+  const sel = document.getElementById('deleteShelterSelect').value;
+  if(!sel){ alert("Select a shelter to delete"); return; }
+  if(confirm("Delete "+sel+"?")){
+    await db.collection('shelters').doc(sel).delete();
+    alert("✅ Shelter deleted");
+  }
+};
+document.getElementById('seedBtn').onclick = function(){ seedShelters(); };
+</script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
